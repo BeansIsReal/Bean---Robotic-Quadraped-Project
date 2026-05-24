@@ -1,7 +1,6 @@
 # Note: Every time code is used, run command in RPi terminal: 
     # cd ~/servo_project
     # source env/bin/activate
-
 import time
 import math
 import board
@@ -10,82 +9,111 @@ from adafruit_pca9685 import PCA9685
 from adafruit_motor import servo
 
 # ==========================================
-# HARDWARE INITIALIZATION FIX
+# HARDWARE INITIALIZATION
 # ==========================================
-# 1. Initialize the I2C bus
 i2c = busio.I2C(board.SCL, board.SDA)
-
-# 2. Create the PCA9685 object using the I2C bus
 pca_board = PCA9685(i2c)
-
-# 3. Set frequency to 50Hz (crucial for standard servos)
 pca_board.frequency = 50
 
-# 4. Initialize the servos on the correct channels
-standard_servo_hip = servo.Servo(pca_board.channels[1], min_pulse=500, max_pulse=2500)
-standard_servo_knee = servo.Servo(pca_board.channels[2], min_pulse=500, max_pulse=2500)
+standard_servo_hip = servo.Servo(pca_board.channels[0], min_pulse=500, max_pulse=2500)
+standard_servo_knee = servo.Servo(pca_board.channels[1], min_pulse=500, max_pulse=2500)
+
+# ==========================================
+# CALIBRATION CONSTANTS
+# ==========================================
+# Assuming you mechanically set the leg to horizontal/vertical at 90 degrees:
+HIP_OFFSET = 90  
+KNEE_OFFSET = 90 
+
+# Change these to -1 if the servo moves the opposite direction you expect
+HIP_DIR =-1      
+KNEE_DIR = 1    
 
 # ==========================================
 # MAIN PROGRAM
 # ==========================================
 print("Welcome to the Hexapod Inverse Kinematics Main!")
-print("This program calculates the angles of the joints needed to reach a specific endpoint in 2D space.")
 
-J1 = float(input("Enter the length of the first joint (J1): "))
-J2 = float(input("Enter the length of the second joint (J2): "))
+J1 = 56.8
+J2 = 108.2
 
-Endpoint_x = float(input("Enter the x-coordinate of the first endpoint: "))
-Endpoint_y = float(input("Enter the y-coordinate of the first endpoint: "))
+Endpoint_x = float(input("Enter the x-coordinate of the FIRST endpoint: "))
+Endpoint_y = float(input("Enter the y-coordinate of the FIRST endpoint: "))
 
-Endpoint2_x = float(input("Enter the x-coordinate of the second endpoint: "))
-Endpoint2_y = float(input("Enter the y-coordinate of the second endpoint: "))
+Endpoint2_x = float(input("Enter the x-coordinate of the SECOND endpoint: "))
+Endpoint2_y = float(input("Enter the y-coordinate of the SECOND endpoint: "))
 
 def calculate_ik(x, y):
     distance = math.sqrt(x**2 + y**2)
 
     # Check if the point is reachable
     if distance > J1 + J2 or distance < abs(J1 - J2):
-        print(f"The endpoint ({x}, {y}) is unreachable with the given joint lengths.")
-        exit()
+        print(f"Warning: The endpoint ({x}, {y}) is unreachable.")
+        return None, None
 
-    # Finding the internal Knee Angle using Law of Cosines
+    # Law of Cosines for internal angles
     cos_knee_angle = (J1**2 + J2**2 - distance**2) / (2 * J1 * J2)
-    # Finding the internal Hip Angle using Law of Cosines
     cos_hip_angle = (distance**2 + J1**2 - J2**2) / (2 * distance * J1)
 
-    # Calculate the target angle
+    # Protect against floating point errors slightly outside [-1, 1]
+    cos_knee_angle = max(-1.0, min(1.0, cos_knee_angle))
+    cos_hip_angle = max(-1.0, min(1.0, cos_hip_angle))
+
+    internal_knee = math.acos(cos_knee_angle)
+    internal_hip = math.acos(cos_hip_angle)
+
     target_angle = math.atan2(y, x)
 
-    # Calculate the actual angles (elbow down configuration)
-    hip_angle = target_angle - math.acos(cos_hip_angle) * -1
-    # Subtracting the internal angle from pi (180 degrees) 
-    knee_angle = math.pi - math.acos(cos_knee_angle) * -1
+    # Mathematical Angles
+    hip_math = target_angle + internal_hip
+    knee_math = math.pi - internal_knee
 
-    print(f"\nDistance to Endpoint: {distance:.2f}")
-    print(f"Knee Angle (in degrees): {math.degrees(knee_angle):.2f}")
-    print(f"Hip Angle (in degrees): {math.degrees(hip_angle):.2f}")
-
-    # FIX: Return only the angles so the servos get the right data
-    return math.degrees(hip_angle), math.degrees(knee_angle)
-
-try:
-    # --- Move to Endpoint 1 ---
-    hip_deg, knee_deg = calculate_ik(Endpoint_x, Endpoint_y)
+    # Map Mathematical Angles to Physical Servo Angles
+    servo_hip = HIP_OFFSET + (math.degrees(hip_math) * HIP_DIR)
     
-    # Ensure angles are within the 0-180 degree limits of the servo library
-    standard_servo_hip.angle = max(0, min(180, hip_deg))
-    standard_servo_knee.angle = max(0, min(180, knee_deg))
-    
-    time.sleep(2)
+    # The "- 90" aligns the math L-shape to our physical center
+    servo_knee = KNEE_OFFSET + ((math.degrees(knee_math) - 90) * KNEE_DIR)
 
-    # --- Move to Endpoint 2 ---
-    hip_deg2, knee_deg2 = calculate_ik(Endpoint2_x, Endpoint2_y)
-    
-    standard_servo_hip.angle = max(0, min(180, hip_deg2))
-    standard_servo_knee.angle = max(0, min(180, knee_deg2))
-    
-    time.sleep(2)
+    # Constrain to 0-180 limits before returning
+    safe_hip = max(0, min(180, servo_hip))
+    safe_knee = max(0, min(180, servo_knee))
 
-finally:
-    # Always safely turn off the I2C connection when the script finishes
-    pca_board.deinit()
+    return safe_hip, safe_knee
+
+# --- Pre-calculate both positions ---
+print("\nCalculating kinematics...")
+hip1, knee1 = calculate_ik(Endpoint_x, Endpoint_y)
+hip2, knee2 = calculate_ik(Endpoint2_x, Endpoint2_y)
+
+# Only proceed if both endpoints are reachable
+if None in (hip1, knee1, hip2, knee2):
+    print("One or both endpoints are out of bounds. Exiting.")
+    exit()
+
+print(f"Endpoint 1 Servo Targets -> Hip: {hip1:.1f} | Knee: {knee1:.1f}")
+print(f"Endpoint 2 Servo Targets -> Hip: {hip2:.1f} | Knee: {knee2:.1f}")
+print("\nStarting movement loop...")
+
+# --- Movement Loop ---
+for i in range(16):
+    print(f"Cycle {i+1}/16: Moving to Endpoint 1")
+    # Command both servos back-to-back instantly
+    standard_servo_hip.angle = hip1
+    time.sleep(0.05)
+    standard_servo_knee.angle = knee1
+    
+    # Sleep only AFTER both commands are sent so they move simultaneously 
+    time.sleep(2) 
+
+    print(f"Cycle {i+1}/16: Moving to Endpoint 2")
+    # Command both servos back-to-back instantly
+    standard_servo_hip.angle = hip2
+    time.sleep(0.05)
+    standard_servo_knee.angle = knee2
+    
+    # Sleep only AFTER both commands are sent
+    time.sleep(2) 
+
+print("Test complete. Powering down servos.")
+# Releasing the servos at the end to prevent overheating
+standard_servo_hip.angle = None
